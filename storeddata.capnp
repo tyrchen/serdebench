@@ -20,10 +20,10 @@ struct StoredData {
 
     vecStrs @6 :List(Text);
     range @7 :Range;
+    vecInt @8 :List(Int64);
 }
 
 struct Range {
     start @0 :UInt64;
     end @1 :UInt64;
 }
-

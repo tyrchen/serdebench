@@ -1,10 +1,10 @@
 use std::io::Cursor;
 
 use abomonation_derive::Abomonation;
+use bytecheck::CheckBytes;
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use prost::Message;
 use rkyv::Archive;
-use bytecheck::CheckBytes;
 use serde::{Deserialize, Serialize};
 
 #[allow(dead_code, unused_imports)]
@@ -19,8 +19,28 @@ pub mod proto3 {
     include!(concat!(env!("OUT_DIR"), "/proto3.rs"));
 }
 
+const STR1: &str = "Hello, Rust! This is a string!";
+const STR2: &str = "To be, or not to be, that is the question:
+Whether 'tis nobler in the mind to suffer
+The slings and arrows of outrageous fortune,
+Or to take Arms against a Sea of troubles,
+And by opposing end them: to die, to sleep;
+No more; and by a sleep, to say we end
+The heart-ache, and the thousand natural shocks
+That Flesh is heir to? 'Tis a consummation
+Devoutly to be wished.";
+
+const SIZE: usize = 8192;
+const LENGTH: u32 = 64;
+const INTS: std::ops::Range<i64> = 100000..((100000 + LENGTH) as i64);
+
 #[derive(
-    Abomonation, Serialize, Deserialize, simd_json_derive::Serialize, simd_json_derive::Deserialize, Archive,
+    Abomonation,
+    Serialize,
+    Deserialize,
+    simd_json_derive::Serialize,
+    simd_json_derive::Deserialize,
+    Archive,
 )]
 #[archive(derive(CheckBytes))]
 pub enum StoredVariants {
@@ -31,7 +51,12 @@ pub enum StoredVariants {
 }
 
 #[derive(
-    Abomonation, Serialize, Deserialize, simd_json_derive::Serialize, simd_json_derive::Deserialize, Archive,
+    Abomonation,
+    Serialize,
+    Deserialize,
+    simd_json_derive::Serialize,
+    simd_json_derive::Deserialize,
+    Archive,
 )]
 #[archive(derive(CheckBytes))]
 pub struct StoredData {
@@ -39,6 +64,7 @@ pub struct StoredData {
     pub opt_bool: Option<bool>,
     pub vec_strs: Vec<String>,
     pub range: std::ops::Range<u64>,
+    pub vec_int: Vec<i64>,
 }
 
 fn compare_serde(c: &mut Criterion) {
@@ -46,10 +72,11 @@ fn compare_serde(c: &mut Criterion) {
     let value = StoredData {
         variant: StoredVariants::Signy(42),
         opt_bool: Some(false),
-        vec_strs: vec!["Hello, Rust!".into()],
+        vec_strs: vec![STR1.into(), STR2.into()],
         range: 0..7878,
+        vec_int: INTS.collect(),
     };
-    let mut buffer = Vec::with_capacity(4096);
+    let mut buffer = Vec::with_capacity(SIZE);
     group.bench_function("sr.json", |b| {
         b.iter(|| {
             black_box(&mut buffer).clear();
@@ -72,8 +99,8 @@ fn compare_serde(c: &mut Criterion) {
     group.bench_function("de.simd-json", |b| {
         use simd_json::AlignedBuf;
         use simd_json_derive::Deserialize;
-        let mut string_buffer = Vec::with_capacity(4096);
-        let mut input_buffer = AlignedBuf::with_capacity(4096);
+        let mut string_buffer = Vec::with_capacity(SIZE);
+        let mut input_buffer = AlignedBuf::with_capacity(SIZE);
         b.iter(|| {
             abobuf.clone_from(&buffer);
             black_box(StoredData::from_slice_with_buffers(
@@ -135,14 +162,14 @@ fn compare_serde(c: &mut Criterion) {
     group.bench_function("de.cbor", |b| {
         b.iter(|| serde_cbor::from_slice::<'_, StoredData>(black_box(&buffer)))
     });
-    let mut bytes = [0u8; 512];
+    let mut bytes = [0u8; SIZE];
     group.bench_function("sr.postcard", |b| {
         b.iter(|| {
             let bytes = &mut bytes;
             black_box(postcard::to_slice(black_box(&value), black_box(bytes))).map(|_| ())
         })
     });
-    let bytes = &mut [0u8; 512];
+    let bytes = &mut [0u8; SIZE];
     let num_bytes = postcard::to_slice(black_box(&value), black_box(bytes))
         .unwrap()
         .len() as u64;
@@ -167,7 +194,13 @@ fn compare_serde(c: &mut Criterion) {
             let variant = Some(
                 flat::Int64::create(&mut fbb, &flat::Int64Args { value: 42 }).as_union_value(),
             );
-            let strs = fbb.create_vector_of_strings(&["Hello, Rust"]);
+            let strs = fbb.create_vector_of_strings(&[STR1, STR2]);
+            let mut ints: Vec<flatbuffers::WIPOffset<flat::Int64<'_>>> = Vec::new();
+            for i in INTS {
+                ints.push(flat::Int64::create(&mut fbb, &flat::Int64Args { value: i }));
+            }
+
+            let ints = fbb.create_vector(&ints);
             let ofs = flat::StoredData::create(
                 &mut fbb,
                 &flat::StoredDataArgs {
@@ -176,6 +209,7 @@ fn compare_serde(c: &mut Criterion) {
                     opt_bool: false,
                     vec_strs: Some(strs),
                     range: Some(&flat::Range::new(0, 42)),
+                    vec_int: Some(ints),
                 },
             );
             flat::finish_stored_data_buffer(&mut fbb, ofs);
@@ -207,6 +241,12 @@ fn compare_serde(c: &mut Criterion) {
                     .map(|s| s.into())
                     .collect::<Vec<String>>(),
                 range: (range.start() as u64)..(range.end() as u64),
+                vec_int: sd
+                    .vec_int()
+                    .unwrap()
+                    .iter()
+                    .map(|v| v.value())
+                    .collect::<Vec<i64>>(),
             }
         })
     });
@@ -222,14 +262,17 @@ fn compare_serde(c: &mut Criterion) {
             let mut message = ::capnp::message::Builder::new(&mut allocator);
             let mut stored_data = message.init_root::<storeddata_capnp::stored_data::Builder>();
             stored_data.reborrow().init_variant().set_signy(42);
-            stored_data
-                .reborrow()
-                .init_vec_strs(1)
-                .set(0, "Hello, Rust");
+            let mut strs = stored_data.reborrow().init_vec_strs(2);
+            strs.set(0, STR1);
+            strs.set(1, STR2);
             stored_data.reborrow().init_opt_bool().set_value(false);
-            let mut range = stored_data.init_range();
+            let mut range = stored_data.reborrow().init_range();
             range.set_start(0);
             range.set_end(42);
+            let mut ints = stored_data.init_vec_int(LENGTH);
+            for i in 0..LENGTH {
+                ints.set(i, (100000 + i) as i64);
+            }
             capnp::serialize::write_message(black_box(&mut buffer), &message).unwrap();
         })
     });
@@ -262,6 +305,8 @@ fn compare_serde(c: &mut Criterion) {
                 .map(|v| v.unwrap().into())
                 .collect();
 
+            let vec_int: Vec<i64> = sd.get_vec_int().unwrap().iter().map(|v| v.into()).collect();
+
             let opt_bool = match sd.get_opt_bool().which().unwrap() {
                 storeddata_capnp::stored_data::opt_bool::None(()) => None,
                 storeddata_capnp::stored_data::opt_bool::Value(b) => Some(b),
@@ -272,6 +317,7 @@ fn compare_serde(c: &mut Criterion) {
                 opt_bool,
                 vec_strs,
                 range: (range.get_start() as u64)..(range.get_end() as u64),
+                vec_int,
             }
         })
     });
@@ -282,13 +328,18 @@ fn compare_serde(c: &mut Criterion) {
             let mut stored_data = message.init_root::<storeddata_capnp::stored_data::Builder>();
             let mut variant = stored_data.reborrow().init_variant();
             variant.set_signy(42);
-            let mut strs = stored_data.reborrow().init_vec_strs(1);
-            strs.set(0, "Hello, Rust");
+            let mut strs = stored_data.reborrow().init_vec_strs(2);
+            strs.set(0, STR1);
+            strs.set(1, STR2);
             let mut opt_bool = stored_data.reborrow().init_opt_bool();
             opt_bool.set_value(false);
-            let mut range = stored_data.init_range();
+            let mut range = stored_data.reborrow().init_range();
             range.set_start(0);
             range.set_end(42);
+            let mut ints = stored_data.init_vec_int(LENGTH);
+            for i in 0..LENGTH {
+                ints.set(i, (100000 + i) as i64);
+            }
             capnp::serialize_packed::write_message(black_box(&mut buffer), &message).unwrap();
         })
     });
@@ -320,6 +371,8 @@ fn compare_serde(c: &mut Criterion) {
                 .map(|v| v.unwrap().into())
                 .collect();
 
+            let vec_int: Vec<i64> = sd.get_vec_int().unwrap().iter().map(|v| v.into()).collect();
+
             let opt_bool = match sd.get_opt_bool().which().unwrap() {
                 storeddata_capnp::stored_data::opt_bool::None(()) => None,
                 storeddata_capnp::stored_data::opt_bool::Value(b) => Some(b),
@@ -330,6 +383,7 @@ fn compare_serde(c: &mut Criterion) {
                 opt_bool,
                 vec_strs,
                 range: (range.get_start() as u64)..(range.get_end() as u64),
+                vec_int,
             }
         })
     });
@@ -346,15 +400,13 @@ fn compare_serde(c: &mut Criterion) {
             });
             storeddata.opt_bool = match value.opt_bool {
                 Some(v) => Some(proto3::stored_data::OptBool::Value(v)),
-                None => None
+                None => None,
             };
             storeddata.vec_strs = value.vec_strs.clone();
-            storeddata.range = Some(
-                proto3::Range {
-                    start: value.range.start as u64,
-                    end: value.range.end as u64
-                }
-            );
+            storeddata.range = Some(proto3::Range {
+                start: value.range.start as u64,
+                end: value.range.end as u64,
+            });
             storeddata.encode(black_box(&mut buffer)).unwrap();
         })
     });
@@ -370,14 +422,15 @@ fn compare_serde(c: &mut Criterion) {
             };
             let opt_bool = match &storeddata.opt_bool.as_ref() {
                 Some(proto3::stored_data::OptBool::Value(v)) => Some(*v),
-                None => None
+                None => None,
             };
             let range = &storeddata.range.as_ref().unwrap();
             StoredData {
                 variant: variant,
                 opt_bool: opt_bool,
                 vec_strs: storeddata.vec_strs,
-                range: (range.start as u64)..(range.end as u64)
+                range: (range.start as u64)..(range.end as u64),
+                vec_int: storeddata.vec_int,
             }
         })
     });
@@ -397,12 +450,12 @@ fn compare_serde(c: &mut Criterion) {
         })
     });
 
-    let mut rkyv_buffer = rkyv::Aligned([0u8; 4096]);
+    let mut rkyv_buffer = rkyv::Aligned([0u8; SIZE]);
     let mut rkyv_pos = 0;
     let mut rkyv_len = 0;
     group.bench_function("sr.rkyv", |b| {
         b.iter(|| {
-            use rkyv::{Write, WriteExt};
+            use rkyv::Write;
 
             black_box(&mut buffer).clear();
             let mut writer = rkyv::ArchiveBuffer::new(&mut rkyv_buffer);
@@ -413,12 +466,17 @@ fn compare_serde(c: &mut Criterion) {
     println!("rkyv: {} bytes", rkyv_len);
     group.bench_function("de.rkyv (unvalidated)", |b| {
         b.iter(|| {
-            black_box(unsafe { rkyv::archived_value::<StoredData>(black_box(rkyv_buffer.as_ref()), rkyv_pos) });
+            black_box(unsafe {
+                rkyv::archived_value::<StoredData>(black_box(rkyv_buffer.as_ref()), rkyv_pos)
+            });
         })
     });
     group.bench_function("de.rkyv (validated)", |b| {
         b.iter(|| {
-            black_box(rkyv::check_archive::<StoredData>(black_box(rkyv_buffer.as_ref()), rkyv_pos).unwrap());
+            black_box(
+                rkyv::check_archive::<StoredData>(black_box(rkyv_buffer.as_ref()), rkyv_pos)
+                    .unwrap(),
+            );
         })
     });
 

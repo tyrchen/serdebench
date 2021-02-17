@@ -33,6 +33,7 @@ table StoredData {
     opt_bool: bool;
     vec_strs: [string];
     range: Range;
+    vec_int: [Int64];
 }
 
 root_type StoredData;

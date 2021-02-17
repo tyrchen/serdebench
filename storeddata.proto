@@ -19,5 +19,5 @@ message StoredData {
     };
     repeated string vec_strs = 6;
     Range range = 7;
+    repeated int64 vec_int = 8;
 }
-
